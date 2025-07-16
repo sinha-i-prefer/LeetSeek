@@ -1,0 +1,3 @@
+requests
+beautifulsoup4 # Keep this if you plan to add any HTML parsing later, though not strictly needed for GraphQL
+firebase-admin
