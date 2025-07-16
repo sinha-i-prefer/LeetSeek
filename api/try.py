@@ -4,6 +4,7 @@ from bs4 import BeautifulSoup # BeautifulSoup might not be strictly needed for L
 import json
 import os # For environment variables
 import datetime # For timestamp conversion
+import base64
 
 # Import Firebase Admin SDK
 import firebase_admin
@@ -15,7 +16,9 @@ from firebase_admin import firestore
 if not firebase_admin._apps:
     # Get service account key from environment variable
     # Vercel will inject this as a string
-    service_account_info = json.loads(os.environ.get("FIREBASE_SERVICE_ACCOUNT_KEY"))
+    encoded_key = os.environ.get("FIREBASE_SERVICE_ACCOUNT_B64")
+    decoded_bytes = base64.b64decode(encoded_key)
+    service_account_info = json.loads(decoded_bytes)
     cred = credentials.Certificate(service_account_info)
     firebase_admin.initialize_app(cred)
 
