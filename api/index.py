@@ -10,8 +10,7 @@ from http.server import BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 
 # --- Firebase Initialization ---
-# IMPORTANT: This section securely initializes Firebase using an environment variable.
-# It decodes the Base64 service account key stored in Vercel's settings.
+# This section securely initializes Firebase using an environment variable.
 try:
     # Get the Base64 encoded service account from environment variables
     base64_creds = os.environ.get('FIREBASE_SERVICE_ACCOUNT_BASE64')
@@ -112,59 +111,92 @@ def get_leetcode_summary(username):
         "name": name,
         "username": username,
         "problems_solved": solved,
-        "last_submission": last_submission or "No recent AC submissions found."
+        "last_submission": last_submission
     }
 
 # --- Vercel Serverless Handler ---
 class handler(BaseHTTPRequestHandler):
     def do_GET(self):
-        """Handles GET requests to the serverless function."""
-        # Parse username from query parameters (e.g., /api?username=test)
+        """Handles GET requests for single users or scheduled cron jobs."""
         query_components = parse_qs(urlparse(self.path).query)
         username = query_components.get('username', [None])[0]
+        # Check for a specific query parameter to identify the cron job
+        source = query_components.get('source', [None])[0]
 
         self.send_response(200)
         self.send_header('Content-type', 'application/json')
         self.end_headers()
-
+        
         response = {}
 
-        # Check if Firebase is initialized
+        # --- Firebase Initialization Check ---
         if not FIREBASE_INITIALIZED:
             response = {"status": "error", "message": "Firebase initialization failed.", "details": FIREBASE_ERROR}
             self.wfile.write(json.dumps(response, indent=2).encode('utf-8'))
             return
 
-        # Check if username is provided
-        if not username:
-            response = {"status": "error", "message": "Please provide a 'username' query parameter."}
-            self.wfile.write(json.dumps(response, indent=2).encode('utf-8'))
-            return
+        # --- Cron Job Logic ---
+        if source == 'cron':
+            try:
+                # 1. Get all existing usernames from Firestore
+                users_ref = db.collection("leetcodeUsers").stream()
+                usernames = [doc.id for doc in users_ref]
+                
+                updated_count = 0
+                failed_users = []
 
-        try:
-            # Fetch data from LeetCode
-            leetcode_data = get_leetcode_summary(username)
-
-            if "error" in leetcode_data:
-                response = {"status": "error", "message": leetcode_data["error"]}
-            else:
-                # Add server timestamp and write to Firestore
-                leetcode_data["last_updated"] = firestore.SERVER_TIMESTAMP
-                doc_ref = db.collection("leetcodeUsers").document(username)
-                doc_ref.set(leetcode_data)
+                # 2. Loop through each username and update their data
+                for uname in usernames:
+                    try:
+                        print(f"CRON: Updating {uname}...")
+                        leetcode_data = get_leetcode_summary(uname)
+                        if "error" not in leetcode_data:
+                            leetcode_data["last_updated"] = firestore.SERVER_TIMESTAMP
+                            db.collection("leetcodeUsers").document(uname).set(leetcode_data, merge=True)
+                            updated_count += 1
+                        else:
+                            failed_users.append(uname)
+                    except Exception as e:
+                        print(f"CRON: Failed to update {uname}: {e}")
+                        failed_users.append(uname)
                 
                 response = {
                     "status": "success",
-                    "message": f"Successfully fetched and stored data for {username}.",
-                    "firestore_path": f"leetcodeUsers/{username}",
-                    "data": leetcode_data
+                    "job": "cron_update_all",
+                    "total_users_found": len(usernames),
+                    "updated_successfully": updated_count,
+                    "failed_to_update": len(failed_users),
+                    "failed_users": failed_users
                 }
-                # Note: SERVER_TIMESTAMP won't be JSON serializable, so we remove it for the response
-                del response["data"]["last_updated"]
+            except Exception as e:
+                response = {"status": "error", "job": "cron_update_all", "details": str(e)}
 
-        except Exception as e:
-            response = {"status": "error", "message": "An internal error occurred.", "details": str(e)}
+        # --- Single User Logic ---
+        elif username:
+            try:
+                leetcode_data = get_leetcode_summary(username)
+                if "error" in leetcode_data:
+                    response = {"status": "error", "message": leetcode_data["error"]}
+                else:
+                    leetcode_data["last_updated"] = firestore.SERVER_TIMESTAMP
+                    doc_ref = db.collection("leetcodeUsers").document(username)
+                    doc_ref.set(leetcode_data)
+                    
+                    # Remove non-serializable field for the JSON response
+                    if "last_updated" in leetcode_data:
+                        del leetcode_data["last_updated"]
+                        
+                    response = {
+                        "status": "success",
+                        "message": f"Successfully fetched and stored data for {username}.",
+                        "data": leetcode_data
+                    }
+            except Exception as e:
+                response = {"status": "error", "message": "An internal error occurred.", "details": str(e)}
+        
+        # --- No Valid Parameter Logic ---
+        else:
+            response = {"status": "error", "message": "Please provide a 'username' query parameter or use '?source=cron'."}
 
         self.wfile.write(json.dumps(response, indent=2).encode('utf-8'))
         return
-                
