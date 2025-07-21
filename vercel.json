@@ -12,4 +12,12 @@
     }
   ]
 }
+{
+  "crons": [
+    {
+      "path": "/api/index?source=cron",
+      "schedule": "0 */6 * * *"
+    }
+  ]
+}
                 
