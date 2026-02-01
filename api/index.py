@@ -171,13 +171,17 @@ class handler(BaseHTTPRequestHandler):
             except Exception as e:
                 response = {"status": "error", "job": "cron_update_all", "details": str(e)}
 
-        # --- Single User Logic ---
+        # --- Single User Logic (CORRECTED) ---
         elif username:
             try:
                 leetcode_data = get_leetcode_summary(username)
+                
+                # Check if the data contains an error (invalid user)
                 if "error" in leetcode_data:
+                    # If error, return failure response and DO NOT write to DB
                     response = {"status": "error", "message": leetcode_data["error"]}
                 else:
+                    # Only write to DB if the user is valid
                     leetcode_data["last_updated"] = firestore.SERVER_TIMESTAMP
                     doc_ref = db.collection("leetcodeUsers").document(username)
                     doc_ref.set(leetcode_data)
