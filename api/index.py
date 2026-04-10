@@ -3,7 +3,7 @@ import requests
 import json
 import datetime
 import firebase_admin
-from firebase_admin import credentials, firestore
+from firebase_admin import credentials, firestore, messaging
 import os
 import base64
 from http.server import BaseHTTPRequestHandler
@@ -114,6 +114,68 @@ def get_leetcode_summary(username):
         "last_submission": last_submission
     }
 
+
+# --- FCM Notification Logic ---
+def notify_friends_of_activity(username, name, last_submission):
+    """
+    When a user has new activity, find all users who have them as a friend
+    and send FCM push notifications to their devices.
+    """
+    if not last_submission:
+        return 0
+
+    try:
+        # Collection group query: find all friend docs where username matches
+        friends_query = db.collection_group("friends").where("username", "==", username).stream()
+
+        notifications_sent = 0
+        for friend_doc in friends_query:
+            # The parent path is: users/{uid}/friends/{friendDoc}
+            # Navigate up to get the uid
+            parent_ref = friend_doc.reference.parent.parent
+            if not parent_ref:
+                continue
+
+            uid = parent_ref.id
+
+            # Get this user's FCM token
+            try:
+                user_doc = db.collection("users").document(uid).get()
+                if not user_doc.exists:
+                    continue
+
+                fcm_token = user_doc.to_dict().get("fcmToken")
+                if not fcm_token:
+                    continue
+
+                # Build and send the notification
+                message = messaging.Message(
+                    data={
+                        "friendName": name or username,
+                        "problemTitle": last_submission.get("title", "a new problem"),
+                        "problemLang": last_submission.get("lang", ""),
+                    },
+                    notification=messaging.Notification(
+                        title=f"🔥 {name or username} solved a problem!",
+                        body=f"{last_submission.get('title', 'New problem')} ({last_submission.get('lang', '')})",
+                    ),
+                    token=fcm_token,
+                )
+
+                messaging.send(message)
+                notifications_sent += 1
+                print(f"FCM: Notified {uid} about {username}'s activity")
+
+            except Exception as e:
+                print(f"FCM: Failed to notify {uid}: {e}")
+
+        return notifications_sent
+
+    except Exception as e:
+        print(f"FCM: Error in notify_friends_of_activity: {e}")
+        return 0
+
+
 # --- Vercel Serverless Handler ---
 class handler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -140,10 +202,22 @@ class handler(BaseHTTPRequestHandler):
             try:
                 # 1. Get all existing usernames from Firestore
                 users_ref = db.collection("leetcodeUsers").stream()
-                usernames = [doc.id for doc in users_ref]
+                
+                # Build a dict of old data so we can detect changes
+                old_data = {}
+                usernames = []
+                for doc in users_ref:
+                    uname = doc.id
+                    usernames.append(uname)
+                    doc_dict = doc.to_dict()
+                    old_submission = doc_dict.get("last_submission")
+                    old_data[uname] = {
+                        "last_submission": old_submission
+                    }
                 
                 updated_count = 0
                 failed_users = []
+                total_notifications = 0
 
                 # 2. Loop through each username and update their data
                 for uname in usernames:
@@ -154,6 +228,19 @@ class handler(BaseHTTPRequestHandler):
                             leetcode_data["last_updated"] = firestore.SERVER_TIMESTAMP
                             db.collection("leetcodeUsers").document(uname).set(leetcode_data, merge=True)
                             updated_count += 1
+
+                            # Check if last_submission changed → notify friends
+                            new_submission = leetcode_data.get("last_submission")
+                            old_submission = old_data.get(uname, {}).get("last_submission")
+
+                            if new_submission and new_submission != old_submission:
+                                sent = notify_friends_of_activity(
+                                    username=uname,
+                                    name=leetcode_data.get("name", uname),
+                                    last_submission=new_submission
+                                )
+                                total_notifications += sent
+                                print(f"CRON: {uname} has new activity, sent {sent} notifications")
                         else:
                             failed_users.append(uname)
                     except Exception as e:
@@ -166,7 +253,8 @@ class handler(BaseHTTPRequestHandler):
                     "total_users_found": len(usernames),
                     "updated_successfully": updated_count,
                     "failed_to_update": len(failed_users),
-                    "failed_users": failed_users
+                    "failed_users": failed_users,
+                    "notifications_sent": total_notifications
                 }
             except Exception as e:
                 response = {"status": "error", "job": "cron_update_all", "details": str(e)}
